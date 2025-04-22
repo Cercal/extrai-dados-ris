@@ -1,164 +1,131 @@
 import re
+import time
 from pathlib import Path
 from datetime import datetime
 
-HOME       = Path.home()
-DOWNLOADS  = HOME / "Downloads"
-RIS_FILE   = DOWNLOADS / "Zotero.ris"
+# --------------------------------------------------
+# CONFIGURAÇÃO DE CAMINHOS
+# --------------------------------------------------
+HOME = Path.home()
+DOWNLOADS = HOME / "Downloads"
 
-# ------------------ AST e DNF ------------------
+# nome do seu arquivo RIS dentro de ~/Downloads
+RIS_FILENAME = "Zotero.ris"
+RIS_PATH = DOWNLOADS / RIS_FILENAME
 
-class Expr:
-    def eval(self, txt: str) -> bool:
-        raise NotImplementedError
-
-class Term(Expr):
-    def __init__(self, term: str):
-        self.term = term.lower().strip()
-    def eval(self, txt: str) -> bool:
-        return self.term in txt.lower()
-
-class NotOp(Expr):
-    def __init__(self, child: Expr):
-        self.child = child
-    def eval(self, txt: str) -> bool:
-        return not self.child.eval(txt)
-
-class BinOp(Expr):
-    def __init__(self, left: Expr, right: Expr):
-        self.left = left; self.right = right
-
-class AndOp(BinOp):
-    def eval(self, txt: str) -> bool:
-        return self.left.eval(txt) and self.right.eval(txt)
-
-class OrOp(BinOp):
-    def eval(self, txt: str) -> bool:
-        return self.left.eval(txt) or self.right.eval(txt)
-
-def tokenize(q: str):
-    return [t.strip() for t in
-            re.findall(r'\(|\)|\bAND\b|\bOR\b|\bNOT\b|[^()\s]+(?:\s+[^()\s]+)*',
-                       q, flags=re.IGNORECASE) if t.strip()]
-
-def shunting_yard(tokens):
-    prec = {'NOT':3,'AND':2,'OR':1}
-    out, stack = [], []
-    for tk in tokens:
-        u = tk.upper()
-        if u in prec:
-            while stack and stack[-1] != '(' and (
-                prec.get(stack[-1],0) > prec[u] or
-                (prec.get(stack[-1],0) == prec[u] and u!='NOT')
-            ):
-                out.append(stack.pop())
-            stack.append(u)
-        elif tk == '(':
-            stack.append(tk)
-        elif tk == ')':
-            while stack and stack[-1] != '(':
-                out.append(stack.pop())
-            stack.pop()
-        else:
-            out.append(tk)
-    out += reversed(stack)
-    return out
-
-def build_ast(rpn):
-    stack = []
-    for tk in rpn:
-        u = tk.upper()
-        if u == 'NOT':
-            c = stack.pop(); stack.append(NotOp(c))
-        elif u == 'AND':
-            r = stack.pop(); l = stack.pop(); stack.append(AndOp(l,r))
-        elif u == 'OR':
-            r = stack.pop(); l = stack.pop(); stack.append(OrOp(l,r))
-        else:
-            stack.append(Term(tk))
-    return stack[0]
-
-def parse_query(q: str) -> Expr:
-    return build_ast(shunting_yard(tokenize(q)))
-
-def ast_to_dnf(expr: Expr):
-    """Converte AST em lista de conjunções (DNF)."""
-    if isinstance(expr, Term) or isinstance(expr, NotOp):
-        return [[expr]]
-    if isinstance(expr, OrOp):
-        return ast_to_dnf(expr.left) + ast_to_dnf(expr.right)
-    if isinstance(expr, AndOp):
-        d1 = ast_to_dnf(expr.left); d2 = ast_to_dnf(expr.right)
-        return [c1 + c2 for c1 in d1 for c2 in d2]
-    return []
-
-# ------------------ Parsing RIS ------------------
-
-def parse_ris_entries(path: Path):
-    entries, cur = [], []
-    with path.open('r', encoding='utf-8', errors='ignore') as f:
-        for ln in f:
-            cur.append(ln.rstrip('\n'))
-            if ln.startswith('ER  -'):
-                entries.append(cur); cur = []
-    if cur: entries.append(cur)
+# --------------------------------------------------
+# FUNÇÕES AUXILIARES
+# --------------------------------------------------
+def parse_ris_entries(ris_path: Path):
+    entries, current = [], []
+    with ris_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            current.append(line.rstrip("\n"))
+            if line.startswith("ER  -"):
+                entries.append(current)
+                current = []
+    if current:
+        entries.append(current)
     return entries
 
-def extract_tag(entry, tag):
-    p = tag + '  -'
-    return [ln[len(p):].strip() for ln in entry if ln.startswith(p)]
+def extract_tag_values(entry_lines, tag):
+    prefix = tag + "  -"
+    return [
+        line[len(prefix):].strip()
+        for line in entry_lines
+        if line.startswith(prefix)
+    ]
 
-def clean_id(raw: str) -> str:
-    m = re.search(r'(doi\.org/\S+)', raw, re.IGNORECASE)
-    if m: return m.group(1)
-    m = re.search(r'(10\.\d{4,9}/[^\s]+)', raw)
-    if m: return m.group(1)
-    return raw.strip()
+def extract_first_tag(entry_lines, tag):
+    vals = extract_tag_values(entry_lines, tag)
+    return vals[0] if vals else None
 
-# ------------------ Main Loop ------------------
+def clean_identifier(raw: str) -> str:
+    raw = raw.strip()
+    m = re.search(r"(doi\.org/\S+)", raw, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"(10\.\d{4,9}/[^\s]+)", raw)
+    if m:
+        return m.group(1)
+    if raw.startswith("10."):
+        return raw
+    return raw
 
+def matches_query(text: str, terms: list[str], op: str) -> bool:
+    txt = text.lower()
+    if op == "AND":
+        return all(t.lower() in txt for t in terms)
+    if op == "OR":
+        return any(t.lower() in txt for t in terms)
+    if op == "NOT":
+        return terms[0].lower() not in txt
+    return terms[0].lower() in txt  # SINGLE
+
+def parse_user_query(query: str):
+    q = query.strip()
+    if " AND " in q.upper():
+        return [p.strip() for p in re.split(r"(?i)\s+AND\s+", q)], "AND"
+    if " OR " in q.upper():
+        return [p.strip() for p in re.split(r"(?i)\s+OR\s+", q)], "OR"
+    if q.upper().startswith("NOT "):
+        return [q[4:].strip()], "NOT"
+    return [q], "SINGLE"
+
+# --------------------------------------------------
+# FLUXO PRINCIPAL EM LOOP
+# --------------------------------------------------
 def main():
-    if not RIS_FILE.exists():
-        print(f"RIS não encontrado: {RIS_FILE}")
+    if not RIS_PATH.exists():
+        print(f"Arquivo RIS não encontrado: {RIS_PATH}")
         return
 
-    entries = parse_ris_entries(RIS_FILE)
-    print(f"Total de entradas no RIS: {len(entries)}")
+    # Carrega e divide as entradas
+    entries = parse_ris_entries(RIS_PATH)
+    total_entries = len(entries)
+    print(f"Total de entradas no arquivo: {total_entries}")
 
     while True:
-        q = input("\nQuery (ou SAIR): ").strip()
-        if q.upper() == 'SAIR':
+        query = input(
+            "\nDigite sua busca "
+            "(e.g. 'lixo eletrônico', 'patrimônio ambiental AND sustentabilidade', "
+            "'NOT e-waste') ou SAIR para encerrar: "
+        ).strip()
+        if query.upper() == "SAIR":
+            print("Encerrando o programa.")
             break
 
-        expr = parse_query(q)
-        dnf = ast_to_dnf(expr)
-        print(f"Expandindo para {len(dnf)} conjunções na DNF.")
+        terms, op = parse_user_query(query)
+        print(f"Buscando {terms} ({op}) em TI, AB e KW...")
 
-        results = []
-        for ent in entries:
-            ti  = extract_tag(ent,'TI')
-            ab  = extract_tag(ent,'AB')
-            kws = extract_tag(ent,'KW')
-            txt = ' '.join(ti+ab+kws)
+        found = []
+        for entry in entries:
+            ti = extract_first_tag(entry, "TI") or ""
+            ab = extract_first_tag(entry, "AB") or ""
+            kws = extract_tag_values(entry, "KW")
+            texto = " ".join([ti, ab] + kws)
 
-            # testar cada conjunção
-            if any(all(c.eval(txt) for c in conj) for conj in dnf):
-                raw = (extract_tag(ent,'DO') or extract_tag(ent,'UR') or [''])[0]
-                cid = clean_id(raw)
-                if cid:
-                    results.append(cid)
+            if matches_query(texto, terms, op):
+                raw = extract_first_tag(entry, "DO") or extract_first_tag(entry, "UR") or ""
+                cleaned = clean_identifier(raw)
+                if cleaned:
+                    found.append(cleaned)
 
-        if not results:
-            print("Nenhum item encontrado.")
+        if not found:
+            print("Nenhum resultado encontrado para essa busca.")
             continue
 
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        fn = re.sub(r'[^\w\-]','_',q)[:30]
-        out = DOWNLOADS / f"resultado_{fn}_{ts}.txt"
-        with out.open('w', encoding='utf-8') as f:
-            f.write(', '.join(results))
+        # cria nome de arquivo único
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_query = re.sub(r"[^\w\-]", "_", query)[:30]
+        filename = f"resultado_{safe_query}_{timestamp}.txt"
+        output_path = DOWNLOADS / filename
 
-        print(f"{len(results)} IDs em {out}")
+        # salva sem sobrescrever
+        with output_path.open("w", encoding="utf-8") as out:
+            out.write(", ".join(found))
 
-if __name__=='__main__':
+        print(f"{len(found)} resultados gravados em: {output_path}")
+
+if __name__ == "__main__":
     main()
