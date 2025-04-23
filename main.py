@@ -4,7 +4,7 @@ from datetime import datetime
 
 HOME       = Path.home()
 DOWNLOADS  = HOME / "Downloads"
-RIS_FILE   = DOWNLOADS / "Zotero.ris"
+RIS_FILE   = DOWNLOADS / "seuarquivo.ris"
 
 # ------------------ AST e DNF ------------------
 
@@ -17,12 +17,16 @@ class Term(Expr):
         self.term = term.lower().strip()
     def eval(self, txt: str) -> bool:
         return self.term in txt.lower()
+    def __repr__(self):
+        return f'"{self.term}"'
 
 class NotOp(Expr):
     def __init__(self, child: Expr):
         self.child = child
     def eval(self, txt: str) -> bool:
         return not self.child.eval(txt)
+    def __repr__(self):
+        return f'NOT({self.child})'
 
 class BinOp(Expr):
     def __init__(self, left: Expr, right: Expr):
@@ -31,10 +35,14 @@ class BinOp(Expr):
 class AndOp(BinOp):
     def eval(self, txt: str) -> bool:
         return self.left.eval(txt) and self.right.eval(txt)
+    def __repr__(self):
+        return f'({self.left} AND {self.right})'
 
 class OrOp(BinOp):
     def eval(self, txt: str) -> bool:
         return self.left.eval(txt) or self.right.eval(txt)
+    def __repr__(self):
+        return f'({self.left} OR {self.right})'
 
 def tokenize(q: str):
     return [t.strip() for t in
@@ -132,16 +140,29 @@ def main():
 
         expr = parse_query(q)
         dnf = ast_to_dnf(expr)
-        print(f"Expandindo para {len(dnf)} conjunções na DNF.")
+        print(f"\nExpandindo para {len(dnf)} conjunções na DNF:\n")
 
+        # Pré-contagem por conjunção
+        for idx, conj in enumerate(dnf, 1):
+            count = 0
+            for ent in entries:
+                ti  = extract_tag(ent,'TI')
+                ab  = extract_tag(ent,'AB')
+                kws = extract_tag(ent,'KW')
+                txt = ' '.join(ti + ab + kws)
+                if all(c.eval(txt) for c in conj):
+                    count += 1
+            # exibe a conjunção e quantos itens a satisfazem
+            print(f"  {idx}. {' AND '.join(repr(c) for c in conj)} -> {count} itens")
+
+        # Agora coleta resultados (qualquer conjunção satisfeita)
         results = []
         for ent in entries:
             ti  = extract_tag(ent,'TI')
             ab  = extract_tag(ent,'AB')
             kws = extract_tag(ent,'KW')
-            txt = ' '.join(ti+ab+kws)
+            txt = ' '.join(ti + ab + kws)
 
-            # testar cada conjunção
             if any(all(c.eval(txt) for c in conj) for conj in dnf):
                 raw = (extract_tag(ent,'DO') or extract_tag(ent,'UR') or [''])[0]
                 cid = clean_id(raw)
@@ -149,16 +170,18 @@ def main():
                     results.append(cid)
 
         if not results:
-            print("Nenhum item encontrado.")
+            print("Nenhum item encontrado para essa query.")
             continue
 
+        # gravação do arquivo de saída
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         fn = re.sub(r'[^\w\-]','_',q)[:30]
         out = DOWNLOADS / f"resultado_{fn}_{ts}.txt"
         with out.open('w', encoding='utf-8') as f:
             f.write(', '.join(results))
 
-        print(f"{len(results)} IDs em {out}")
+        print(f"\nTotal geral de IDs encontrados: {len(results)}")
+        print(f"Resultados gravados em: {out}")
 
 if __name__=='__main__':
     main()
