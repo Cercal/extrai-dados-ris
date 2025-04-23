@@ -30,7 +30,8 @@ class NotOp(Expr):
 
 class BinOp(Expr):
     def __init__(self, left: Expr, right: Expr):
-        self.left = left; self.right = right
+        self.left = left
+        self.right = right
 
 class AndOp(BinOp):
     def eval(self, txt: str) -> bool:
@@ -45,85 +46,103 @@ class OrOp(BinOp):
         return f'({self.left} OR {self.right})'
 
 def tokenize(q: str):
-    return [t.strip() for t in
-            re.findall(r'\(|\)|\bAND\b|\bOR\b|\bNOT\b|[^()\s]+(?:\s+[^()\s]+)*',
-                       q, flags=re.IGNORECASE) if t.strip()]
+    # Captura parênteses, operadores e termos (mesmo multi-palavra)
+    tokens = re.findall(
+        r'\(|\)|\bAND\b|\bOR\b|\bNOT\b|[^()\s]+(?:\s+[^()\s]+)*',
+        q, flags=re.IGNORECASE
+    )
+    return [t.strip() for t in tokens if t.strip()]
 
 def shunting_yard(tokens):
+    # Precedência: NOT > AND > OR
     prec = {'NOT':3,'AND':2,'OR':1}
-    out, stack = [], []
+    output, stack = [], []
     for tk in tokens:
-        u = tk.upper()
-        if u in prec:
-            while stack and stack[-1] != '(' and (
-                prec.get(stack[-1],0) > prec[u] or
-                (prec.get(stack[-1],0) == prec[u] and u!='NOT')
-            ):
-                out.append(stack.pop())
-            stack.append(u)
+        up = tk.upper()
+        if up in prec:
+            # operadores binários e unários
+            while stack and stack[-1] != '(' and prec.get(stack[-1],0) >= prec[up]:
+                output.append(stack.pop())
+            stack.append(up)
         elif tk == '(':
             stack.append(tk)
         elif tk == ')':
             while stack and stack[-1] != '(':
-                out.append(stack.pop())
-            stack.pop()
+                output.append(stack.pop())
+            stack.pop()  # descarta '('
         else:
-            out.append(tk)
-    out += reversed(stack)
-    return out
+            output.append(tk)
+    # esvazia pilha (descarta parênteses remanescentes)
+    while stack:
+        op = stack.pop()
+        if op not in ('(',')'):
+            output.append(op)
+    return output
 
 def build_ast(rpn):
     stack = []
     for tk in rpn:
-        u = tk.upper()
-        if u == 'NOT':
-            c = stack.pop(); stack.append(NotOp(c))
-        elif u == 'AND':
-            r = stack.pop(); l = stack.pop(); stack.append(AndOp(l,r))
-        elif u == 'OR':
-            r = stack.pop(); l = stack.pop(); stack.append(OrOp(l,r))
+        up = tk.upper()
+        if up == 'NOT':
+            child = stack.pop()
+            stack.append(NotOp(child))
+        elif up == 'AND':
+            right = stack.pop(); left = stack.pop()
+            stack.append(AndOp(left, right))
+        elif up == 'OR':
+            right = stack.pop(); left = stack.pop()
+            stack.append(OrOp(left, right))
         else:
             stack.append(Term(tk))
     return stack[0]
 
 def parse_query(q: str) -> Expr:
-    return build_ast(shunting_yard(tokenize(q)))
+    tokens = tokenize(q)
+    rpn = shunting_yard(tokens)
+    return build_ast(rpn)
 
 def ast_to_dnf(expr: Expr):
-    """Converte AST em lista de conjunções (DNF)."""
+    """ Converte o AST para Disjunctive Normal Form (lista de conjunções). """
     if isinstance(expr, Term) or isinstance(expr, NotOp):
         return [[expr]]
     if isinstance(expr, OrOp):
         return ast_to_dnf(expr.left) + ast_to_dnf(expr.right)
     if isinstance(expr, AndOp):
-        d1 = ast_to_dnf(expr.left); d2 = ast_to_dnf(expr.right)
-        return [c1 + c2 for c1 in d1 for c2 in d2]
+        left_clauses  = ast_to_dnf(expr.left)
+        right_clauses = ast_to_dnf(expr.right)
+        # produto cartesiano: todas combinações de cláusulas
+        return [l + r for l in left_clauses for r in right_clauses]
     return []
 
-# ------------------ Parsing RIS ------------------
+# ------------------ Parsing do RIS ------------------
 
 def parse_ris_entries(path: Path):
-    entries, cur = [], []
+    entries, current = [], []
     with path.open('r', encoding='utf-8', errors='ignore') as f:
         for ln in f:
-            cur.append(ln.rstrip('\n'))
+            current.append(ln.rstrip('\n'))
             if ln.startswith('ER  -'):
-                entries.append(cur); cur = []
-    if cur: entries.append(cur)
+                entries.append(current)
+                current = []
+    if current:
+        entries.append(current)
     return entries
 
 def extract_tag(entry, tag):
-    p = tag + '  -'
-    return [ln[len(p):].strip() for ln in entry if ln.startswith(p)]
+    prefix = tag + '  -'
+    return [ln[len(prefix):].strip() for ln in entry if ln.startswith(prefix)]
 
 def clean_id(raw: str) -> str:
-    m = re.search(r'(doi\.org/\S+)', raw, re.IGNORECASE)
-    if m: return m.group(1)
+    # isola apenas doi.org/... ou 10.xxxx/...
+    m = re.search(r'(doi\.org/\S+)', raw, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
     m = re.search(r'(10\.\d{4,9}/[^\s]+)', raw)
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
     return raw.strip()
 
-# ------------------ Main Loop ------------------
+# ------------------ Loop Principal ------------------
 
 def main():
     if not RIS_FILE.exists():
@@ -134,37 +153,36 @@ def main():
     print(f"Total de entradas no RIS: {len(entries)}")
 
     while True:
-        q = input("\nQuery (ou SAIR): ").strip()
-        if q.upper() == 'SAIR':
+        query = input("\nQuery (ou SAIR para encerrar): ").strip()
+        if query.upper() == 'SAIR':
+            print("Fim.")
             break
 
-        expr = parse_query(q)
+        expr = parse_query(query)
         dnf = ast_to_dnf(expr)
-        print(f"\nExpandindo para {len(dnf)} conjunções na DNF:\n")
-
-        # Pré-contagem por conjunção
-        for idx, conj in enumerate(dnf, 1):
+        print(f"\nDNF gerou {len(dnf)} conjunções:")
+        # 1) listar e contar cada conjunção
+        for i, conj in enumerate(dnf, start=1):
             count = 0
             for ent in entries:
-                ti  = extract_tag(ent,'TI')
-                ab  = extract_tag(ent,'AB')
-                kws = extract_tag(ent,'KW')
-                txt = ' '.join(ti + ab + kws)
-                if all(c.eval(txt) for c in conj):
+                ti  = extract_tag(ent, 'TI')
+                ab  = extract_tag(ent, 'AB')
+                kws = extract_tag(ent, 'KW')
+                texto = ' '.join(ti + ab + kws)
+                if all(c.eval(texto) for c in conj):
                     count += 1
-            # exibe a conjunção e quantos itens a satisfazem
-            print(f"  {idx}. {' AND '.join(repr(c) for c in conj)} -> {count} itens")
+            expr_str = ' AND '.join(repr(c) for c in conj)
+            print(f"  {i}. {expr_str}  → {count} itens")
 
-        # Agora coleta resultados (qualquer conjunção satisfeita)
+        # 2) coleta resultados de qualquer conjunção satisfeita
         results = []
         for ent in entries:
-            ti  = extract_tag(ent,'TI')
-            ab  = extract_tag(ent,'AB')
-            kws = extract_tag(ent,'KW')
-            txt = ' '.join(ti + ab + kws)
-
-            if any(all(c.eval(txt) for c in conj) for conj in dnf):
-                raw = (extract_tag(ent,'DO') or extract_tag(ent,'UR') or [''])[0]
+            ti  = extract_tag(ent, 'TI')
+            ab  = extract_tag(ent, 'AB')
+            kws = extract_tag(ent, 'KW')
+            texto = ' '.join(ti + ab + kws)
+            if any(all(c.eval(texto) for c in conj) for conj in dnf):
+                raw = (extract_tag(ent, 'DO') or extract_tag(ent, 'UR') or [''])[0]
                 cid = clean_id(raw)
                 if cid:
                     results.append(cid)
@@ -173,15 +191,15 @@ def main():
             print("Nenhum item encontrado para essa query.")
             continue
 
-        # gravação do arquivo de saída
+        # salva em ~/Downloads
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        fn = re.sub(r'[^\w\-]','_',q)[:30]
-        out = DOWNLOADS / f"resultado_{fn}_{ts}.txt"
-        with out.open('w', encoding='utf-8') as f:
+        safe = re.sub(r'[^\w\-]', '_', query)[:30]
+        out_file = DOWNLOADS / f"resultado_{safe}_{ts}.txt"
+        with out_file.open('w', encoding='utf-8') as f:
             f.write(', '.join(results))
 
-        print(f"\nTotal geral de IDs encontrados: {len(results)}")
-        print(f"Resultados gravados em: {out}")
+        print(f"\nTotal geral de IDs: {len(results)}")
+        print(f"Gravado em: {out_file}")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
